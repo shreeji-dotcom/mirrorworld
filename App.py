@@ -1,11 +1,4 @@
 
-Commit it.
-
----
-
-## 6) The code again (paste into `app.py`)
-
-```python
 import streamlit as st
 import numpy as np
 import pandas as pd
