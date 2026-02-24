@@ -971,7 +971,7 @@ with left:
                 st.dataframe(pd.DataFrame(state["history"]), use_container_width=True, hide_index=True)
             else:
                 st.info("Run your first quarter to generate the log.")
-```0def risk_label(p):
+```def risk_label(p):
     if p >= 70: return "Critical"
     if p >= 50: return "Elevated"
     if p >= 30: return "Moderate"
