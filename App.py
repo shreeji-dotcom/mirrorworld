@@ -1,18 +1,17 @@
-# App.py — MirrorWorld (Premium Prototype)
-# Standard = Endless (play until you stop or crash; goal: $1B)
-# Advanced = 8 quarters (hard stop after Q8 unless you lose earlier)
-#
-# Core design:
-# - You start as a $200M AI FinTech (fixed baseline).
-# - You choose Seed Raise ($5–$50M). Seed affects runway/visibility/scrutiny (NOT valuation).
-# - Each quarter: choose simple levers (Growth, Governance, Counterfactual YES/NO, Expansion)
-# - Plus AI strategy levers (Product focus, Model strategy, Data policy, PR posture).
-# - Mirror AI competitor adapts to your behavior.
-# - “Choose-your-own-adventure” Decision Events trigger frequently enough to feel like a story.
-#
-# Goals:
-# - Fun, easy to understand, but masters-level concepts (risk, governance, ethics, disruption).
-# - Clear instructions, premium UI, readable metrics, non-choppy narrative.
+# App.py — MirrorWorld (Simplified + Premium + Easy)
+# ---------------------------------------------------
+# You asked for:
+# - Standard = Endless mode
+# - Advanced = 8 quarters mode
+# - Start at $200M valuation
+# - Let players choose seed raise (affects runway/scrutiny, NOT valuation)
+# - Counterfactuals as YES/NO
+# - Clear, fun, choose-your-own-adventure decision trees (visible + not confusing)
+# - A tutorial wizard that helps WITHOUT sounding patronizing
+# - A premium HUD that’s readable (no truncated metrics)
+# - Tuned growth math so $1B is achievable and the game feels fun
+# - Remove confusing “first product line / theme” from start screen
+# - Make product selection a simple “This Quarter’s Mission” choice
 
 import time
 import streamlit as st
@@ -20,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 # -----------------------------
-# Page + Premium UI styling
+# Page config + styling
 # -----------------------------
 st.set_page_config(page_title="MirrorWorld", layout="wide")
 
@@ -29,16 +28,31 @@ st.markdown(
     <style>
       .mw-hero { font-size: 2.2rem; font-weight: 800; letter-spacing: -0.02em; }
       .mw-sub { font-size: 1.02rem; opacity: 0.90; }
-      .mw-card { padding: 1rem 1.1rem; border-radius: 18px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.04); }
-      .mw-chip { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 999px; background: rgba(255,255,255,0.08); margin-right: 0.4rem; font-size: 0.85rem;}
       .mw-divider { height: 1px; background: rgba(255,255,255,0.10); margin: 0.9rem 0; }
+      .mw-chip { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 999px; background: rgba(255,255,255,0.08); margin-right: 0.4rem; font-size: 0.85rem;}
+      .mw-muted { opacity: 0.86; }
       [data-testid="stMetricValue"] { font-size: 1.55rem; }
       [data-testid="stMetricLabel"] { font-size: 0.9rem; }
-      .mw-muted { opacity: 0.86; }
     </style>
     """,
     unsafe_allow_html=True
 )
+
+# -----------------------------
+# Constants (tune here)
+# -----------------------------
+START_VALUATION_M = 200.0
+GOAL_VALUATION_M = 1000.0
+SHUTDOWN_VIOLATIONS = 3
+
+# Growth pacing: “fun” and reachable
+BASE_GROWTH = 20.0       # base lift each quarter
+MAX_GROWTH_ADD = 92.0    # scaled by Growth Target + multipliers
+NOISE_SD = 4.0
+
+# Advanced harshness
+ADV_RISK_MULT = 1.12
+ADV_REG_MULT = 1.10
 
 # -----------------------------
 # Helpers
@@ -49,6 +63,13 @@ def clamp(x, lo, hi):
 def fmt_m(x):
     return f"${x:,.0f}M"
 
+def risk_label(p):
+    p = float(p)
+    if p >= 70: return "Critical"
+    if p >= 50: return "Elevated"
+    if p >= 30: return "Moderate"
+    return "Low"
+
 def pressure_label(p):
     p = float(p)
     if p >= 80: return "Very High"
@@ -57,67 +78,54 @@ def pressure_label(p):
     if p >= 20: return "Low"
     return "Very Low"
 
-def risk_label(p):
-    p = float(p)
-    if p >= 70: return "Critical"
-    if p >= 50: return "Elevated"
-    if p >= 30: return "Moderate"
-    return "Low"
-
 def arrow(delta):
     if delta > 1.2: return "▲"
     if delta < -1.2: return "▼"
     return "→"
 
 # -----------------------------
-# State + RNG
+# RNG + state
 # -----------------------------
 def init_state():
-    # random seed gives replayability
     seed = int(time.time() * 1000) % 2_000_000_000
     rng = np.random.default_rng(seed)
 
     return {
         "phase": "setup",
+
+        # identity + mode
         "player_name": "",
-        "mode": "Standard",      # Standard (Endless) / Advanced (8)
-        "max_quarters": None,    # None = endless; 8 = advanced
+        "mode": "Standard",        # Standard (Endless) or Advanced (8)
+        "max_quarters": None,      # None=Endless, 8=Advanced
         "tutorial_on": True,
         "tutorial_step": 1,
 
+        # time
         "quarter": 1,
-        "game_over": False,
-        "end_reason": "",
-        "won": False,
 
-        # Baseline: fixed valuation
-        "valuation_m": 0.0,
-
-        # key state
-        "trust": 55.0,
-        "governance": 52.0,
+        # metrics
+        "valuation_m": START_VALUATION_M,
+        "trust": 60.0,
+        "governance": 58.0,
         "reg_pressure": 22.0,
         "crisis_prob": 10.0,
         "hidden_risk": 14.0,
         "violations": 0,
+        "runway_q": 6.0,
 
-        # runway & seed choice
-        "seed_m": 0.0,
-        "runway_q": 6.0,          # quarters of runway buffer; seed increases this
-        "product_line": None,
-
-        # Mirror AI competitor
-        "comp_strength": 12.0,     # 0..100
+        # competitor
+        "comp_strength": 12.0,
         "comp_strategy": "Observing",
-        "comp_memory": {"skipped_checks": 0, "fast_growth": 0, "transparent": 0},
+        "comp_memory": {"skip_checks": 0, "fast": 0, "transparent": 0},
 
-        # narrative + logs
+        # game status
+        "game_over": False,
+        "end_reason": "",
+        "won": False,
+
+        # events/log
+        "pending_event": None,
         "headlines": ["Welcome to MirrorWorld."],
-        "briefing": "",
-        "debrief": "",
-
-        # decision event system
-        "pending_event": None,   # dict with title/setup/choices
         "history": [],
 
         "rng_state": rng.bit_generator.state,
@@ -132,25 +140,25 @@ def save_rng(state, rng):
     state["rng_state"] = rng.bit_generator.state
 
 # -----------------------------
-# Game tuning knobs (easy to adjust)
+# Simple “Mission” mapping
 # -----------------------------
-GOAL_VALUATION = 1000.0     # $1B
-BASE_START_VALUATION = 200.0
+MISSION_OPTIONS = [
+    "Credit (underwriting)",
+    "Fraud (detection)",
+    "Advisory (GenAI)"
+]
 
-# Growth tuning: “feel good” but not trivial
-# typical good quarter adds ~40–120M depending on choices and health
-GROWTH_BASE = 22.0          # baseline lift per quarter
-GROWTH_MAX_ADD = 95.0       # additional based on growth target + multipliers
-
-# Advanced is harsher on risk/penalties
-ADV_RISK_MULT = 1.12
-ADV_REG_MULT = 1.10
+def mission_to_focus(mission_str: str) -> str:
+    if mission_str.startswith("Credit"):
+        return "Credit"
+    if mission_str.startswith("Fraud"):
+        return "Fraud"
+    return "Advisory"
 
 # -----------------------------
-# Decision Events (Choose-your-own-adventure)
+# Decision Events (choose-your-own-adventure)
 # -----------------------------
-def decision_event_templates():
-    # Keep choices understandable: each option is a plain-English move with clear tradeoffs.
+def event_templates():
     return [
         {
             "id": "credit_fairness",
@@ -231,30 +239,30 @@ def apply_effects(state, effects):
             state[k] = clamp(state.get(k, 0.0) + float(v), 0, 100)
 
 def event_probability(state, decision):
-    # Intentionally frequent enough to feel like a real story.
-    p = 0.25
+    # Frequent enough to feel like a story, but not constant.
+    p = 0.22
     p += 0.10 if state["hidden_risk"] >= 45 else 0.0
     p += 0.08 if state["reg_pressure"] >= 55 else 0.0
     p += 0.08 if state["comp_strength"] >= 45 else 0.0
     p += 0.10 if (decision["growth"] >= 70 and not decision["counterfactual_yes"]) else 0.0
     if state["mode"] == "Advanced":
         p += 0.05
-    return clamp(p, 0.18, 0.65)
+    return clamp(p, 0.16, 0.62)
 
-def choose_event(state, decision):
+def choose_event(state, focus):
     rng = get_rng(state)
-    templates = decision_event_templates()
+    templates = event_templates()
 
-    # Weighted by product focus + current context
+    # Weight by mission focus so players feel the connection
     weights = []
     for t in templates:
         w = 1.0
-        if decision["product_focus"] == "Credit" and t["id"] == "credit_fairness":
-            w += 1.0
-        if decision["product_focus"] == "Fraud" and t["id"] == "fraud_wave":
-            w += 1.0
-        if decision["product_focus"] == "Advisory" and t["id"] == "advisory_hallucination":
-            w += 1.0
+        if focus == "Credit" and t["id"] == "credit_fairness":
+            w += 1.2
+        if focus == "Fraud" and t["id"] == "fraud_wave":
+            w += 1.2
+        if focus == "Advisory" and t["id"] == "advisory_hallucination":
+            w += 1.2
         if t["id"] == "regulator_call" and state["reg_pressure"] >= 50:
             w += 0.8
         if t["id"] == "mirror_undercut" and state["comp_strength"] >= 40:
@@ -268,140 +276,127 @@ def choose_event(state, decision):
     return templates[idx]
 
 # -----------------------------
-# Core mechanics (tuned growth math)
+# Growth math (tuned)
 # -----------------------------
-def compute_valuation_gain(state, decision):
+def compute_valuation_gain(state, decision, focus):
     """
     Tuned for fun pacing:
-      - A “good” quarter: ~60–120M gain
-      - A sloppy quarter: can be 20–50M and sets up future pain
+    - Good quarter: ~60–120M gain
+    - Sloppy quarter: 20–60M and increases future shocks
     """
     rng = get_rng(state)
-
     growth = decision["growth"] / 100.0
-    gov = decision["gov_budget"] / 100.0
-    cf_yes = decision["counterfactual_yes"]
 
-    expansion = decision["expansion"]
-    product = decision["product_focus"]
-    model = decision["model_strategy"]
-    data = decision["data_policy"]
-    pr = decision["pr_posture"]
+    base = BASE_GROWTH + growth * MAX_GROWTH_ADD
 
-    # Base growth: scaled by growth target
-    base = GROWTH_BASE + growth * GROWTH_MAX_ADD
-
-    # Expansion multiplier
-    if expansion == "Wide":
+    # expansion
+    exp = decision["expansion"]
+    if exp == "Wide":
         base *= 1.18
-    elif expansion == "Balanced":
+    elif exp == "Balanced":
         base *= 1.06
     else:
         base *= 0.93
 
-    # Product upside vs sensitivity
-    if product == "Fraud":
+    # mission focus (light boost)
+    if focus == "Fraud":
         base *= 1.10
-    elif product == "Credit":
-        base *= 1.04
-    else:  # Advisory
+    elif focus == "Advisory":
         base *= 1.06
+    else:
+        base *= 1.03
 
-    # Model strategy
+    # model strategy
+    model = decision["model_strategy"]
     if model == "Open":
         base *= 1.06
     elif model == "Hybrid":
         base *= 1.03
-    else:  # Closed
+    else:
         base *= 0.99
 
-    # Data policy
+    # data policy
+    data = decision["data_policy"]
     if data == "Aggressive":
         base *= 1.07
     elif data == "Minimal":
         base *= 0.96
 
-    # PR posture affects conversion & retention slightly
+    # PR posture
+    pr = decision["pr_posture"]
     if pr == "Transparent":
         base *= 1.02
     elif pr == "Defensive":
         base *= 0.97
 
-    # Health multipliers: trust + governance improve scalable execution
+    # health multipliers
     trust_factor = 0.86 + (state["trust"] / 100.0) * 0.28
     gov_factor = 0.86 + (state["governance"] / 100.0) * 0.22
     base *= trust_factor * gov_factor
 
-    # Counterfactual checks: slightly reduce immediate speed but prevent blowups
-    if cf_yes:
+    # counterfactual: slightly slower now, safer later
+    if decision["counterfactual_yes"]:
         base *= 0.94
     else:
         base *= 1.02
 
-    # Runway: more runway reduces forced panic decisions (slight upside)
-    runway_factor = 0.98 + min(0.06, state["runway_q"] * 0.006)  # caps at +6%
-    base *= runway_factor
+    # runway helps stability a bit
+    base *= (0.98 + min(0.06, state["runway_q"] * 0.006))
 
-    # Noise
-    base += rng.normal(0, 4.0)
-
+    base += rng.normal(0, NOISE_SD)
     save_rng(state, rng)
     return max(0.0, float(base))
 
-def apply_risk_dynamics(state, decision):
+# -----------------------------
+# Risk dynamics + incidents
+# -----------------------------
+def apply_risk(state, decision, focus):
     rng = get_rng(state)
 
     growth = decision["growth"] / 100.0
     gov = decision["gov_budget"] / 100.0
     cf_yes = decision["counterfactual_yes"]
-    expansion = decision["expansion"]
+    exp = decision["expansion"]
     data = decision["data_policy"]
     pr = decision["pr_posture"]
-    product = decision["product_focus"]
 
-    # Governance & trust drift
-    # Governance improves with spend, slightly erodes with extreme growth
-    state["governance"] = clamp(
-        state["governance"] + gov * 10.0 - growth * 3.2,
-        0, 100
-    )
+    # governance drift
+    state["governance"] = clamp(state["governance"] + gov * 10.0 - growth * 3.2, 0, 100)
 
-    # Counterfactual YES improves trust; NO hurts trust
-    state["trust"] = clamp(
-        state["trust"] + (1.8 if cf_yes else -1.6) + (0.8 if pr == "Transparent" else (-0.7 if pr == "Defensive" else 0.0)),
-        0, 100
-    )
+    # trust drift
+    trust_delta = (1.8 if cf_yes else -1.6)
+    trust_delta += (0.8 if pr == "Transparent" else (-0.7 if pr == "Defensive" else 0.0))
+    if data == "Minimal":
+        trust_delta += 0.4
+    if data == "Aggressive":
+        trust_delta -= 0.6
+    state["trust"] = clamp(state["trust"] + trust_delta + rng.normal(0, 0.4), 0, 100)
 
-    # Hidden risk accumulation (compounding)
+    # hidden risk accumulation
     risk_add = 4.0 + growth * 7.0
-    risk_add += 2.5 if expansion == "Wide" else (1.0 if expansion == "Balanced" else 0.2)
+    risk_add += 2.5 if exp == "Wide" else (1.0 if exp == "Balanced" else 0.2)
     risk_add += 2.8 if data == "Aggressive" else (0.0 if data == "Balanced" else -1.2)
     risk_add += 1.2 if pr == "Defensive" else 0.0
-    risk_add += 1.8 if product == "Credit" else (0.8 if product == "Advisory" else 0.2)
+    risk_add += 1.8 if focus == "Credit" else (0.8 if focus == "Advisory" else 0.2)
 
-    # Governance reduces risk; counterfactual reduces compounding
     risk_add -= gov * 6.0
-    if cf_yes:
-        risk_add *= 0.78
-    else:
-        risk_add *= 1.08
+    risk_add *= (0.78 if cf_yes else 1.08)
 
     if state["mode"] == "Advanced":
         risk_add *= ADV_RISK_MULT
 
     state["hidden_risk"] = clamp(state["hidden_risk"] + risk_add + rng.normal(0, 1.0), 0, 100)
 
-    # Regulatory pressure: rises when growth outpaces governance; aggressive data increases it
+    # regulatory pressure
     reg_add = max(0.0, (decision["growth"] - state["governance"])) / 100.0 * 9.0
     reg_add += 3.5 if data == "Aggressive" else 0.0
     reg_add -= 1.5 if pr == "Transparent" else 0.0
-
     if state["mode"] == "Advanced":
         reg_add *= ADV_REG_MULT
 
     state["reg_pressure"] = clamp(state["reg_pressure"] + reg_add + rng.normal(0, 0.8), 0, 100)
 
-    # Crisis probability update (simple Bayesian-ish smoothing)
+    # crisis probability (smooth)
     prior = state["crisis_prob"] / 100.0
     signal = (
         0.55 * (state["hidden_risk"] / 100.0) +
@@ -413,14 +408,13 @@ def apply_risk_dynamics(state, decision):
     posterior = 0.62 * prior + 0.38 * signal
     state["crisis_prob"] = clamp(posterior * 100.0, 1.0, 95.0)
 
-    # Incidents/violations chance (readable + fair)
-    # More likely with high hidden risk, high reg pressure, NO counterfactuals
+    # incidents/violations probability (readable + fair)
     incident_p = 0.02
-    incident_p += 0.0012 * state["hidden_risk"]         # up to +0.12
-    incident_p += 0.0007 * state["reg_pressure"]        # up to +0.07
+    incident_p += 0.0012 * state["hidden_risk"]
+    incident_p += 0.0007 * state["reg_pressure"]
     incident_p += 0.03 if not cf_yes else 0.0
     incident_p += 0.02 if data == "Aggressive" else 0.0
-    incident_p += 0.02 if expansion == "Wide" else 0.0
+    incident_p += 0.02 if exp == "Wide" else 0.0
     if state["mode"] == "Advanced":
         incident_p += 0.02
 
@@ -432,30 +426,28 @@ def apply_risk_dynamics(state, decision):
 
     save_rng(state, rng)
 
-def update_runway(state, decision):
-    # Runway slowly burns; good governance slows burn, aggressive growth speeds it up
+def burn_runway(state, decision):
     burn = 1.0
-    burn += 0.3 if decision["expansion"] == "Wide" else (0.1 if decision["expansion"] == "Balanced" else -0.05)
+    burn += 0.30 if decision["expansion"] == "Wide" else (0.10 if decision["expansion"] == "Balanced" else -0.05)
     burn += 0.25 if decision["growth"] >= 75 else 0.0
     burn -= 0.25 if decision["gov_budget"] >= 65 else 0.0
-
     state["runway_q"] = max(0.0, state["runway_q"] - burn)
 
 # -----------------------------
-# Competitor (Mirror AI)
+# Mirror AI competitor
 # -----------------------------
 def update_competitor(state, decision):
     rng = get_rng(state)
     mem = state["comp_memory"]
 
     if not decision["counterfactual_yes"]:
-        mem["skipped_checks"] += 1
+        mem["skip_checks"] += 1
     if decision["growth"] >= 70:
-        mem["fast_growth"] += 1
+        mem["fast"] += 1
     if decision["pr_posture"] == "Transparent":
         mem["transparent"] += 1
 
-    risky = (mem["skipped_checks"] >= 2) or (decision["data_policy"] == "Aggressive") or (decision["pr_posture"] == "Defensive")
+    risky = (mem["skip_checks"] >= 2) or (decision["data_policy"] == "Aggressive") or (decision["pr_posture"] == "Defensive")
     disciplined = (decision["gov_budget"] >= 60) and decision["counterfactual_yes"] and (decision["pr_posture"] == "Transparent")
 
     if risky and state["reg_pressure"] >= 35:
@@ -467,10 +459,8 @@ def update_competitor(state, decision):
     else:
         state["comp_strategy"] = "Copycat"
 
-    # Strength grows with your visibility (valuation) + your openings
     visibility = min(1.0, state["valuation_m"] / 1000.0)
-    opening = 0.8
-    opening += 2.7 if not decision["counterfactual_yes"] else 0.4
+    opening = 0.8 + (2.7 if not decision["counterfactual_yes"] else 0.4)
     opening += 2.0 if decision["pr_posture"] == "Defensive" else 0.6
     opening += 1.7 if decision["data_policy"] == "Aggressive" else 0.5
     if state["mode"] == "Advanced":
@@ -485,12 +475,12 @@ def update_competitor(state, decision):
     if state["comp_strategy"] == "Price War":
         hit = (0.02 + 0.00055 * s) * state["valuation_m"]
         state["valuation_m"] = max(0.0, state["valuation_m"] - hit)
-        headlines.append("⚔️ Mirror AI opens a price war: you feel margin + churn pressure.")
+        headlines.append("⚔️ Mirror AI opens a price war: margin pressure rises.")
 
     elif state["comp_strategy"] == "Safety-First":
         trust_hit = 0.8 + (max(0.0, 60 - state["governance"]) / 40.0) * 2.0
         state["trust"] = clamp(state["trust"] - trust_hit, 0, 100)
-        headlines.append("🛡️ Mirror AI markets 'safer by design': trust becomes a competitive scoreboard.")
+        headlines.append("🛡️ Mirror AI markets 'safer by design': trust becomes a scoreboard.")
 
     elif state["comp_strategy"] == "Copycat":
         steal = (0.017 + 0.00035 * s) * state["valuation_m"]
@@ -510,22 +500,19 @@ def update_competitor(state, decision):
     return headlines
 
 # -----------------------------
-# End / Win / Score
+# End / win / score
 # -----------------------------
 def end_check(state):
-    # Standard & Advanced both shutdown at 3 violations (keeps rubric serious)
-    if state["violations"] >= 3:
+    if state["violations"] >= SHUTDOWN_VIOLATIONS:
         state["game_over"] = True
         state["end_reason"] = "Regulatory shutdown: too many incidents/violations."
         return
 
-    # collapse condition
     if state["trust"] < 25 and state["reg_pressure"] > 75:
         state["game_over"] = True
         state["end_reason"] = "Trust collapse under high regulatory pressure."
         return
 
-    # systemic crisis cap differs by mode
     cap = 70 if state["mode"] == "Advanced" else 78
     if state["crisis_prob"] > cap:
         state["game_over"] = True
@@ -533,20 +520,21 @@ def end_check(state):
         return
 
 def win_check(state):
-    if (state["valuation_m"] >= GOAL_VALUATION) and (state["trust"] >= 70.0) and (not state["game_over"]):
+    if (state["valuation_m"] >= GOAL_VALUATION_M) and (state["trust"] >= 70) and (not state["game_over"]):
         state["won"] = True
 
 def score(state):
-    val_score = min(100.0, (state["valuation_m"] / GOAL_VALUATION) * 100.0)
+    val_score = min(100.0, (state["valuation_m"] / GOAL_VALUATION_M) * 100.0)
     penalty = state["reg_pressure"] * 0.24 + state["crisis_prob"] * 0.58 + state["violations"] * 10.0
     total = val_score * 0.52 + state["trust"] * 0.20 + state["governance"] * 0.20 - penalty * 0.10
     return clamp(total, 0.0, 100.0)
 
 # -----------------------------
-# Story copy (briefing/debrief)
+# Narrative
 # -----------------------------
-def quarter_briefing(state):
+def briefing(state):
     nm = state["player_name"] or "You"
+
     if state["trust"] >= 70:
         mood = "Markets believe you can scale responsibly."
     elif state["trust"] >= 50:
@@ -570,126 +558,102 @@ def quarter_briefing(state):
 
     return f"**Briefing for {nm}:** {mood} {reg} {comp}"
 
-def quarter_debrief(state, before, comp_headlines, event_triggered):
+def debrief(state, before, comp_headlines, event_triggered):
     dv = state["valuation_m"] - before["valuation_m"]
     dt = state["trust"] - before["trust"]
     dg = state["governance"] - before["governance"]
 
-    debrief = (
-        f"**Debrief:** Valuation {arrow(dv)} {fmt_m(state['valuation_m'])} "
-        f"({dv:+.0f}M), Trust {arrow(dt)} {state['trust']:.0f} ({dt:+.1f}), "
+    line = (
+        f"**Debrief:** Valuation {arrow(dv)} {fmt_m(state['valuation_m'])} ({dv:+.0f}M), "
+        f"Trust {arrow(dt)} {state['trust']:.0f} ({dt:+.1f}), "
         f"Governance {arrow(dg)} {state['governance']:.0f} ({dg:+.1f})."
     )
-
     if event_triggered:
-        debrief += " A story decision has triggered—resolve it to continue."
-
+        line += " A story decision triggered—resolve it to continue."
     if comp_headlines:
-        debrief += " " + " ".join(comp_headlines)
-
-    return debrief
+        line += " " + " ".join(comp_headlines)
+    return line
 
 # -----------------------------
-# Tutorial wizard (opt-in, non-condescending)
+# Tutorial wizard (opt-in)
 # -----------------------------
 def tutorial_panel(state):
     if not state.get("tutorial_on", False):
         return
 
     step = int(state.get("tutorial_step", 1))
-    nm = (state.get("player_name") or "You").strip() or "You"
-
     st.markdown("### 🧭 Optional Walkthrough")
+
     if step == 1:
-        st.write(f"Welcome, **{nm}**. You’ll run an AI FinTech through disruption while Mirror AI competes.")
-        st.write("Your scoreboard is simple: **Valuation**, **Trust**, **Governance**, and **Reg Pressure**.")
+        st.write("You’re running an AI FinTech through disruption while **Mirror AI** competes.")
+        st.write("Each quarter: pick a mission, set Growth/Governance, choose Counterfactual YES/NO, then commit.")
         if st.button("Next → Levers", key="tut_next_1", use_container_width=True):
             state["tutorial_step"] = 2
             st.session_state.state = state
             st.rerun()
+
     elif step == 2:
-        st.write("Your core levers:")
-        st.write("• **Growth Target** increases valuation but compounds risk.")
-        st.write("• **Governance Budget** improves survivability and reduces future penalties.")
-        st.write("• **Counterfactuals YES/NO**: YES slows you slightly now, but prevents blowups later.")
-        if st.button("Next → How to win", key="tut_next_2", use_container_width=True):
+        st.write("Levers, in plain English:")
+        st.write("• **Growth Target**: faster valuation, more risk.")
+        st.write("• **Governance Budget**: reduces future shock + helps survive scrutiny.")
+        st.write("• **Counterfactual YES/NO**: YES = safer and more trustworthy; NO = faster but riskier.")
+        if st.button("Next → Win conditions", key="tut_next_2", use_container_width=True):
             state["tutorial_step"] = 3
             st.session_state.state = state
             st.rerun()
+
     elif step == 3:
-        st.write("Winning pattern (simple and realistic):")
-        st.write("1) Keep **Counterfactuals = YES** most quarters when scaling.")
-        st.write("2) If **Reg Pressure** spikes, avoid **Wide** expansion for a quarter.")
-        st.write("3) If **Trust** dips, go **Transparent** and increase governance.")
-        if st.button("Next → Play", key="tut_next_3", use_container_width=True):
+        st.write("Win by reaching **$1B** with **Trust ≥ 70** and no shutdown.")
+        st.write("If Reg Pressure spikes, avoid Wide expansion for a quarter. If Hidden Risk spikes, turn Counterfactuals YES.")
+        if st.button("Done → Play", key="tut_next_3", use_container_width=True):
             state["tutorial_step"] = 4
             st.session_state.state = state
             st.rerun()
     else:
-        st.write("You’re set. Make decisions, then **Commit Quarter**. Story events will interrupt you with big choices.")
         if st.button("Hide walkthrough", key="tut_hide", use_container_width=True):
             state["tutorial_on"] = False
             st.session_state.state = state
             st.rerun()
 
 # -----------------------------
-# Start screen (premium)
+# Start screen (simple, not confusing)
 # -----------------------------
 def start_screen(state):
     st.markdown('<div class="mw-hero">🪞 MirrorWorld — AI FinTech Leadership Simulation</div>', unsafe_allow_html=True)
-    st.markdown('<div class="mw-sub mw-muted">A premium “choose-your-own-adventure” sim: grow to $1B without collapsing trust, ethics, or compliance.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="mw-sub mw-muted">Start at $200M. Raise seed for runway + scrutiny. Make decisions. Handle story events. Beat Mirror AI.</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="mw-divider"></div>', unsafe_allow_html=True)
 
-    st.markdown("### How it works (quick)")
+    st.markdown("### Quick rules")
     st.markdown(
-        """
-        - You start as a **$200M** AI FinTech (growth-stage).
-        - You choose a **seed raise** to set runway and scrutiny.
-        - Each quarter you commit decisions; **Mirror AI** adapts; story events trigger.
-        - **Win:** reach **$1B** with **Trust ≥ 70** (no shutdown).
+        f"""
+        - **Standard** = endless. **Advanced** = 8 quarters.
+        - Start valuation: **{fmt_m(START_VALUATION_M)}**
+        - Seed raise affects runway + attention (not valuation).
+        - **Shutdown at {SHUTDOWN_VIOLATIONS} violations.**
+        - Goal: **{fmt_m(GOAL_VALUATION_M)}** with **Trust ≥ 70**.
         """
     )
 
-    c1, c2 = st.columns([1.05, 0.95], gap="large")
+    c1, c2 = st.columns([1.1, 0.9], gap="large")
 
     with c1:
-        name = st.text_input("Your name (used in the story)", value=state.get("player_name", ""), key="setup_name")
-        mode_choice = st.radio(
-            "Mode",
-            options=["Standard (Endless)", "Advanced (8 quarters)"],
-            index=0,
-            key="setup_mode"
-        )
-        tutorial_on = st.checkbox("Guided walkthrough (recommended first run)", value=True, key="setup_tutorial")
-
-        st.markdown('<span class="mw-chip">Standard</span> Endless play', unsafe_allow_html=True)
-        st.markdown('<span class="mw-chip">Advanced</span> Hard stop at Q8', unsafe_allow_html=True)
+        name = st.text_input("Your name", value=state.get("player_name", ""), key="setup_name")
+        mode_choice = st.radio("Mode", ["Standard (Endless)", "Advanced (8 quarters)"], index=0, key="setup_mode")
+        tutorial_on = st.checkbox("Optional walkthrough", value=True, key="setup_tutorial")
 
     with c2:
         seed_m = st.select_slider(
-            "Seed raise ($M) — affects runway + visibility",
+            "Seed raise ($M)",
             options=[5, 10, 20, 35, 50],
             value=20,
             key="setup_seed"
         )
-        product = st.radio(
-            "First product line",
-            ["Credit", "Fraud", "Advisory"],
-            horizontal=True,
-            key="setup_product"
-        )
-
-        if product == "Credit":
-            st.info("**Credit**: steady growth, high fairness/explainability scrutiny.")
-        elif product == "Fraud":
-            st.info("**Fraud**: faster wins, risk of false positives and customer harm.")
-        else:
-            st.info("**Advisory**: high upside, risk of hallucinations/suitability issues.")
+        st.caption("More seed = more runway, but also more visibility and scrutiny.")
 
     st.markdown('<div class="mw-divider"></div>', unsafe_allow_html=True)
 
-    if st.button("🚀 Start Simulation", use_container_width=True, key="setup_start"):
+    if st.button("🚀 Start", use_container_width=True, key="setup_start"):
         rng = get_rng(state)
 
         state["player_name"] = name.strip()
@@ -698,28 +662,20 @@ def start_screen(state):
 
         if mode_choice.startswith("Standard"):
             state["mode"] = "Standard"
-            state["max_quarters"] = None   # endless
+            state["max_quarters"] = None
         else:
             state["mode"] = "Advanced"
-            state["max_quarters"] = 8      # hard stop
+            state["max_quarters"] = 8
 
+        state["valuation_m"] = START_VALUATION_M
         state["seed_m"] = float(seed_m)
-        state["product_line"] = product
 
-        # Fixed baseline valuation (your request)
-        state["valuation_m"] = BASE_START_VALUATION
-
-        # Seed sets runway + scrutiny + competitor learning speed
-        # (This is how you "feel" the seed choice without faking valuation.)
+        # Seed affects runway + scrutiny + competitor strength
         state["runway_q"] = clamp(5.5 + seed_m / 10.0 + rng.uniform(-0.3, 0.3), 4.5, 11.5)
+        state["reg_pressure"] = clamp(rng.uniform(16, 26) + seed_m / 7.5, 0, 100)
+        state["comp_strength"] = clamp(rng.uniform(10, 16) + seed_m / 12.0, 0, 100)
 
-        base_reg = rng.uniform(16, 26)
-        state["reg_pressure"] = clamp(base_reg + seed_m / 7.5, 0, 100)
-
-        base_comp = rng.uniform(10, 16)
-        state["comp_strength"] = clamp(base_comp + seed_m / 12.0, 0, 100)
-
-        # Randomized but sensible starting governance/trust
+        # Randomized but sensible start
         if state["mode"] == "Advanced":
             state["trust"] = float(rng.uniform(48, 60))
             state["governance"] = float(rng.uniform(45, 58))
@@ -733,18 +689,19 @@ def start_screen(state):
 
         state["violations"] = 0
         state["quarter"] = 1
-        state["game_over"] = False
-        state["won"] = False
-        state["end_reason"] = ""
         state["pending_event"] = None
         state["history"] = []
 
         state["comp_strategy"] = "Observing"
-        state["comp_memory"] = {"skipped_checks": 0, "fast_growth": 0, "transparent": 0}
+        state["comp_memory"] = {"skip_checks": 0, "fast": 0, "transparent": 0}
+
+        state["game_over"] = False
+        state["won"] = False
+        state["end_reason"] = ""
 
         nm = state["player_name"] or "You"
         state["headlines"] = [
-            f"🎬 {nm} takes the helm of a ${BASE_START_VALUATION:.0f}M AI FinTech and raises ${seed_m:.0f}M. The market is watching."
+            f"🎬 {nm} steps in as CEO of a {fmt_m(START_VALUATION_M)} AI FinTech and raises {fmt_m(seed_m)}. The world starts watching."
         ]
 
         save_rng(state, rng)
@@ -753,7 +710,7 @@ def start_screen(state):
         st.rerun()
 
 # -----------------------------
-# Main
+# App entry
 # -----------------------------
 if "state" not in st.session_state:
     st.session_state.state = init_state()
@@ -765,13 +722,12 @@ if state["phase"] == "setup":
     st.stop()
 
 # -----------------------------
-# Sidebar: settings + reset
+# Sidebar (simple toggles + reset)
 # -----------------------------
 with st.sidebar:
-    st.subheader("Controls")
-
+    st.subheader("Settings")
     state["tutorial_on"] = st.toggle("Tutorial wizard", value=state.get("tutorial_on", True), key="sb_tutorial")
-    show_coach = st.toggle("Strategy Coach (optional)", value=True, key="sb_coach")
+    show_coach = st.toggle("Strategy Coach", value=True, key="sb_coach")
 
     st.markdown("---")
     if st.button("🔄 New randomized run", use_container_width=True, key="sb_reset"):
@@ -779,46 +735,40 @@ with st.sidebar:
         st.rerun()
 
 # -----------------------------
-# Layout: left game / right HUD
+# Layout: gameplay + HUD
 # -----------------------------
 left, right = st.columns([1.25, 0.75], gap="large")
 
 # -----------------------------
-# HUD (right) — premium and readable
+# HUD (right)
 # -----------------------------
 with right:
     st.markdown("### Executive Dashboard")
 
-    a, b, c = st.columns(3)
-    a.metric("Val", fmt_m(state["valuation_m"]))
-    b.metric("Trust", f"{state['trust']:.0f}/100")
-    c.metric("Gov", f"{state['governance']:.0f}/100")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Val", fmt_m(state["valuation_m"]))
+    c2.metric("Trust", f"{state['trust']:.0f}/100")
+    c3.metric("Gov", f"{state['governance']:.0f}/100")
 
-    d, e = st.columns(2)
-    d.metric("Crisis", f"{state['crisis_prob']:.0f}% ({risk_label(state['crisis_prob'])})")
-    e.metric("Reg", pressure_label(state["reg_pressure"]))
+    d1, d2 = st.columns(2)
+    d1.metric("Crisis", f"{state['crisis_prob']:.0f}% ({risk_label(state['crisis_prob'])})")
+    d2.metric("Reg", pressure_label(state["reg_pressure"]))
 
     st.markdown('<div class="mw-divider"></div>', unsafe_allow_html=True)
-
-    # progress bars (great on mobile)
-    st.progress(int(clamp(state["trust"], 0, 100)))
-    st.caption(f"Trust: {state['trust']:.0f}/100")
-    st.progress(int(clamp(state["governance"], 0, 100)))
-    st.caption(f"Governance: {state['governance']:.0f}/100")
-    st.progress(int(clamp(state["crisis_prob"], 0, 100)))
-    st.caption(f"Crisis probability: {state['crisis_prob']:.0f}%")
-    st.progress(int(clamp(state["reg_pressure"], 0, 100)))
-    st.caption(f"Regulatory pressure: {pressure_label(state['reg_pressure'])}")
+    st.progress(int(clamp(state["trust"], 0, 100))); st.caption(f"Trust: {state['trust']:.0f}/100")
+    st.progress(int(clamp(state["governance"], 0, 100))); st.caption(f"Governance: {state['governance']:.0f}/100")
+    st.progress(int(clamp(state["crisis_prob"], 0, 100))); st.caption(f"Crisis probability: {state['crisis_prob']:.0f}%")
+    st.progress(int(clamp(state["reg_pressure"], 0, 100))); st.caption(f"Reg pressure: {pressure_label(state['reg_pressure'])}")
 
     st.markdown('<div class="mw-divider"></div>', unsafe_allow_html=True)
     st.metric("Mirror AI", f"{state['comp_strength']:.0f}/100")
     st.write(f"**Strategy:** {state['comp_strategy']}")
     st.write(f"**Hidden Risk:** {state['hidden_risk']:.0f}/100")
     st.write(f"**Runway:** {state['runway_q']:.1f} quarters")
-    st.write(f"**Violations:** {state['violations']} (shutdown at 3)")
+    st.write(f"**Violations:** {state['violations']} / {SHUTDOWN_VIOLATIONS}")
     st.write(f"**Score:** {score(state):.1f}/100")
 
-    if show_coach and (not state["game_over"]):
+    if show_coach and not state["game_over"]:
         with st.expander("🧠 Strategy Coach (optional)", expanded=False):
             tips = []
             if state["hidden_risk"] >= 55:
@@ -826,11 +776,11 @@ with right:
             if state["reg_pressure"] >= 60:
                 tips.append("Avoid **Wide** expansion while pressure is high.")
             if state["trust"] < 50:
-                tips.append("Use **PR = Transparent** and increase governance to stabilize trust.")
+                tips.append("Use **PR = Transparent** and raise governance to stabilize trust.")
             if state["runway_q"] <= 1.5:
-                tips.append("Runway is tight—reduce expansion and increase governance to avoid forced crisis decisions.")
+                tips.append("Runway is tight—reduce expansion and avoid aggressive data policy.")
             if not tips:
-                tips.append("You’re stable—push growth carefully, and keep an eye on hidden risk.")
+                tips.append("Stable zone: you can push growth—just watch hidden risk.")
             for t in tips[:4]:
                 st.write("• " + t)
 
@@ -838,13 +788,12 @@ with right:
         st.error(f"Game Over: {state['end_reason']}")
         st.write("**Final Score:**", f"{score(state):.1f}/100")
     elif state["won"]:
-        st.success("🏆 You reached $1B with strong trust. You can keep playing—or end the run.")
+        st.success("🏆 You reached $1B with strong trust. You can keep playing (Standard) or stop.")
 
 # -----------------------------
-# Game (left)
+# Gameplay (left)
 # -----------------------------
 with left:
-    nm = state["player_name"] or "You"
     mode_label = "Standard (Endless)" if state["max_quarters"] is None else "Advanced (8 quarters)"
     st.markdown(f"## Quarter {state['quarter']} — {mode_label}")
 
@@ -852,10 +801,10 @@ with left:
 
     st.markdown('<div class="mw-divider"></div>', unsafe_allow_html=True)
 
-    # If a decision event is pending, show it and block the quarter progression.
-    if state["pending_event"] and (not state["game_over"]):
+    # If event pending: show it FIRST (this is the decision tree moment)
+    if state["pending_event"] and not state["game_over"]:
         ev = state["pending_event"]
-        st.warning(f"🧩 Decision Event: {ev['title']}")
+        st.warning(f"🧩 Story Decision: {ev['title']}")
         st.write(ev["setup"])
         st.markdown("**Choose your move:**")
 
@@ -865,76 +814,64 @@ with left:
                 end_check(state)
                 win_check(state)
 
+                nm = state["player_name"] or "You"
                 state["headlines"] = [f"🧩 {nm} chose: {label}"] + state["headlines"]
                 state["pending_event"] = None
 
                 st.session_state.state = state
                 st.rerun()
 
-        st.info("This is the ‘choose-your-own-adventure’ moment—your choice has immediate and downstream effects.")
+        st.info("This is the choose-your-own-adventure moment. Your choice changes what happens next.")
         st.stop()
 
     # Briefing
-    state["briefing"] = quarter_briefing(state)
-    st.markdown(state["briefing"])
+    st.markdown(briefing(state))
 
     st.markdown('<div class="mw-divider"></div>', unsafe_allow_html=True)
-    st.markdown("### Make your decisions")
 
-    # Core levers (simple)
+    # Quick instructions (super short)
+    with st.expander("Quick instructions (30 seconds)", expanded=False):
+        st.write("1) Pick a mission. 2) Set Growth + Governance. 3) Choose Counterfactual YES/NO. 4) Commit quarter. 5) Handle story decisions when they appear.")
+        st.write(f"Win by reaching {fmt_m(GOAL_VALUATION_M)} with Trust ≥ 70 and avoiding shutdown.")
+
+    st.markdown("### 1) This Quarter’s Mission")
+    mission = st.selectbox("Pick your mission", MISSION_OPTIONS, index=0, key=f"mission_{state['quarter']}")
+    focus = mission_to_focus(mission)
+    st.caption("This only affects what kinds of story events you may face this quarter. You can switch missions any time.")
+
+    st.markdown('<div class="mw-divider"></div>', unsafe_allow_html=True)
+
+    st.markdown("### 2) Core decisions")
     growth = st.slider("Growth Target", 0, 100, 65, key=f"growth_{state['quarter']}")
-    st.caption("Higher growth boosts valuation now—at the cost of higher risk and scrutiny.")
+    st.caption("Higher growth increases valuation faster—but compounds hidden risk and scrutiny.")
 
     gov_budget = st.slider("Governance Budget", 0, 100, 55, key=f"gov_{state['quarter']}")
     st.caption("Funds monitoring, audits, testing, and safer deployment practices.")
 
     counterfactual_yes = st.toggle("Counterfactual Checks (YES/NO)", value=True, key=f"cf_{state['quarter']}")
-    st.caption("YES reduces compounding hidden risk. NO increases speed now—but invites shocks later.")
+    st.caption("YES reduces compounding risk. NO increases speed now—but invites shocks later.")
 
     expansion = st.radio("Expansion Scope", ["Narrow", "Balanced", "Wide"], index=1, horizontal=True, key=f"exp_{state['quarter']}")
     st.caption("Wide scales faster but increases failure surface area.")
 
     st.markdown('<div class="mw-divider"></div>', unsafe_allow_html=True)
-    st.markdown("### AI & Strategy levers")
 
+    st.markdown("### 3) AI + Strategy")
     c1, c2 = st.columns(2)
     with c1:
-        product_focus = st.selectbox(
-            "Product Focus",
-            ["Credit", "Fraud", "Advisory"],
-            index=["Credit", "Fraud", "Advisory"].index(state["product_line"]),
-            key=f"prod_{state['quarter']}"
-        )
-        st.caption("Determines what operational + ethical risks dominate your quarter.")
-
-        model_strategy = st.selectbox(
-            "Model Strategy",
-            ["Open", "Hybrid", "Closed"],
-            index=1,
-            key=f"model_{state['quarter']}"
-        )
+        model_strategy = st.selectbox("Model Strategy", ["Open", "Hybrid", "Closed"], index=1, key=f"model_{state['quarter']}")
         st.caption("Open is faster/cheaper; Closed is controlled; Hybrid balances speed and control.")
 
     with c2:
-        data_policy = st.selectbox(
-            "Data Policy",
-            ["Minimal", "Balanced", "Aggressive"],
-            index=1,
-            key=f"data_{state['quarter']}"
-        )
+        data_policy = st.selectbox("Data Policy", ["Minimal", "Balanced", "Aggressive"], index=1, key=f"data_{state['quarter']}")
         st.caption("Aggressive improves performance but raises privacy/compliance risk.")
 
-        pr_posture = st.selectbox(
-            "PR Posture",
-            ["Transparent", "Quiet", "Defensive"],
-            index=1,
-            key=f"pr_{state['quarter']}"
-        )
-        st.caption("Transparent stabilizes trust; Defensive can backfire under scrutiny.")
+    pr_posture = st.selectbox("PR Posture", ["Transparent", "Quiet", "Defensive"], index=1, key=f"pr_{state['quarter']}")
+    st.caption("Transparent stabilizes trust; Defensive can backfire under scrutiny.")
 
     st.markdown('<div class="mw-divider"></div>', unsafe_allow_html=True)
 
-    run_col, stop_col = st.columns(2)
+    run_col, end_col = st.columns(2)
 
     with run_col:
         if st.button("✅ Commit Quarter", use_container_width=True, key=f"run_{state['quarter']}", disabled=state["game_over"]):
@@ -945,52 +882,51 @@ with left:
             }
 
             decision = {
-                "growth": growth,
-                "gov_budget": gov_budget,
+                "growth": int(growth),
+                "gov_budget": int(gov_budget),
                 "counterfactual_yes": bool(counterfactual_yes),
                 "expansion": expansion,
-                "product_focus": product_focus,
                 "model_strategy": model_strategy,
                 "data_policy": data_policy,
                 "pr_posture": pr_posture,
             }
 
-            # 1) Apply valuation gain (tuned)
-            gain = compute_valuation_gain(state, decision)
+            # 1) valuation gain
+            gain = compute_valuation_gain(state, decision, focus)
             state["valuation_m"] = max(0.0, state["valuation_m"] + gain)
 
-            # 2) Apply risk dynamics + possible incidents
-            apply_risk_dynamics(state, decision)
+            # 2) risk dynamics
+            apply_risk(state, decision, focus)
 
-            # 3) Burn runway
-            update_runway(state, decision)
+            # 3) runway burn
+            burn_runway(state, decision)
 
-            # 4) Competitor acts
+            # 4) competitor acts
             comp_headlines = update_competitor(state, decision)
 
-            # 5) Maybe trigger story event
+            # 5) maybe trigger event
             rng = get_rng(state)
-            triggered = (rng.random() < event_probability(state, decision))
+            trig = (rng.random() < event_probability(state, decision))
             save_rng(state, rng)
-            if triggered and (not state["game_over"]):
-                state["pending_event"] = choose_event(state, decision)
+            if trig and (not state["game_over"]):
+                state["pending_event"] = choose_event(state, focus)
 
-            # 6) End/win checks
+            # 6) end/win checks
             end_check(state)
             win_check(state)
 
-            # 7) Log
+            # 7) log
             state["history"].append({
                 "Quarter": state["quarter"],
                 "Mode": state["mode"],
-                "Growth": growth,
-                "GovBudget": gov_budget,
-                "Counterfactual": "YES" if counterfactual_yes else "NO",
-                "Expansion": expansion,
-                "Product": product_focus,
-                "Model": model_strategy,
-                "Data": data_policy,
-                "PR": pr_posture,
+                "Mission": focus,
+                "Growth": decision["growth"],
+                "GovBudget": decision["gov_budget"],
+                "Counterfactual": "YES" if decision["counterfactual_yes"] else "NO",
+                "Expansion": decision["expansion"],
+                "Model": decision["model_strategy"],
+                "Data": decision["data_policy"],
+                "PR": decision["pr_posture"],
                 "Valuation($M)": round(state["valuation_m"], 1),
                 "Trust": round(state["trust"], 1),
                 "Governance": round(state["governance"], 1),
@@ -1003,15 +939,17 @@ with left:
                 "Violations": state["violations"],
             })
 
-            # 8) Narrative
-            state["debrief"] = quarter_debrief(state, before, comp_headlines, event_triggered=bool(state["pending_event"]))
-            state["headlines"] = [state["debrief"]] + state["headlines"]
+            # 8) narrative
+            nm = state["player_name"] or "You"
+            state["headlines"] = [debrief(state, before, comp_headlines, bool(state["pending_event"]))] + state["headlines"]
 
-            # 9) Advance quarter rules
+            # 9) advance quarter (ONLY if no pending event)
             if (not state["game_over"]) and (state["pending_event"] is None):
                 if state["max_quarters"] is None:
+                    # Standard is endless
                     state["quarter"] += 1
                 else:
+                    # Advanced stops at 8 quarters
                     if state["quarter"] >= state["max_quarters"]:
                         state["game_over"] = True
                         state["end_reason"] = "Advanced run complete: 8 quarters executed."
@@ -1021,9 +959,9 @@ with left:
             st.session_state.state = state
             st.rerun()
 
-    with stop_col:
+    with end_col:
         if state["max_quarters"] is None:
-            if st.button("⏸️ End run (Standard)", use_container_width=True, key="end_run_std"):
+            if st.button("⏸️ End Run (Standard)", use_container_width=True, key="end_run_std"):
                 state["game_over"] = True
                 state["end_reason"] = "Run ended by player (Standard endless)."
                 st.session_state.state = state
