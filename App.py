@@ -1126,4 +1126,3 @@ with left:
 
 # Persist state
 st.session_state.state = state
-```0
